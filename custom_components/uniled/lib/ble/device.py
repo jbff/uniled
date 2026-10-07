@@ -310,17 +310,27 @@ class UniledBleDevice(UniledDevice):
         if retry is None:
             retry = self.retry_count
 
-        _LOGGER.debug("%s: Update - Send State Query... (retrys=%s)", self.name, retry)
-        self._notification_event.clear()
-        if not await self.send(query, retry):
-            return False
+        for attempt in range(max(1, retry + 1)):
+            _LOGGER.debug(
+                "%s: Update - Send State Query... (retrys=%s, attempt=%s)",
+                self.name,
+                retry,
+                attempt,
+            )
+            self._notification_event.clear()
+            if not await self.send(query, retry):
+                return False
 
-        if not self.available:
-            _LOGGER.warning("%s: Update - Failed, device not available.", self.name)
-            return False
+            if not self.available:
+                _LOGGER.warning("%s: Update - Failed, device not available.", self.name)
+                return False
 
-        if not self._notification_event.is_set():
-            # Wait for actual response!
+            if self._notification_event.is_set():
+                break
+
+            # Wait for actual response! On a notification timeout (a lost
+            # mid-burst chunk stalls reassembly), retry the state query
+            # instead of failing the whole poll.
             async with self._operation_lock:
                 _LOGGER.debug(
                     "%s: Update - Awaiting %s seconds for status notification...",
@@ -331,6 +341,14 @@ class UniledBleDevice(UniledDevice):
                     async with async_timeout.timeout(UNILED_BLE_NOTFICATION_TIMEOUT):
                         await self._notification_event.wait()
                 except asyncio.TimeoutError:
+                    if attempt < retry:
+                        _LOGGER.warning(
+                            "%s: Update - Notification timeout, retrying state query (%s/%s).",
+                            self.name,
+                            attempt + 1,
+                            retry,
+                        )
+                        continue
                     _LOGGER.warning(
                         "%s: Update - Failed, notification timeout.", self.name
                     )
