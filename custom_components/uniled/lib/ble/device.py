@@ -41,6 +41,11 @@ UNILED_BLE_BAD_RSSI = -127
 UNILED_BLE_ERROR_BACKOFF_TIME = 0.25
 UNILED_BLE_NOTFICATION_TIMEOUT = 8.0
 
+# Consecutive full poll failures (all state-query attempts timed out)
+# after which the BLE connection is recycled. SP5xx firmware degrades
+# on long-lived connections; a fresh connection recovers the device.
+UNILED_BLE_NOTIFICATION_RECYCLE: int = 3
+
 UUID_MANUFACTURER = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(0x2A29)
 UUID_FIRMWARE_REV = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(0x2A26)
 UUID_HARDWARE_REV = "0000{0:x}-0000-1000-8000-00805f9b34fb".format(0x2A27)
@@ -240,6 +245,7 @@ class UniledBleDevice(UniledDevice):
         self._notify_char: BleakGATTCharacteristic | None = None
         self._last_notification_data: bytearray = ()
         self._last_notification_time = None
+        self._consecutive_notify_timeouts: int = 0
 
         _LOGGER.debug(
             "%s: Inititalizing (%s)...", self.name, model_name if not None else "-?-"
@@ -317,6 +323,7 @@ class UniledBleDevice(UniledDevice):
                 retry,
                 attempt,
             )
+            timed_out = False
             self._notification_event.clear()
             if not await self.send(query, retry):
                 return False
@@ -341,6 +348,7 @@ class UniledBleDevice(UniledDevice):
                     async with async_timeout.timeout(UNILED_BLE_NOTFICATION_TIMEOUT):
                         await self._notification_event.wait()
                 except asyncio.TimeoutError:
+                    timed_out = True
                     if attempt < retry:
                         _LOGGER.warning(
                             "%s: Update - Notification timeout, retrying state query (%s/%s).",
@@ -352,12 +360,29 @@ class UniledBleDevice(UniledDevice):
                     _LOGGER.warning(
                         "%s: Update - Failed, notification timeout.", self.name
                     )
-                    return False
                 except Exception as ex:
                     _LOGGER.warning(
                         "%s: Update - Failed, exception: %s", self.name, str(ex)
                     )
                     return False
+
+            if timed_out:
+                # Some SP5xx firmware degrades on long-lived connections:
+                # status bursts arrive truncated and the device stops
+                # advertising. A fresh connection recovers it, so recycle
+                # the connection after repeated full poll failures.
+                self._consecutive_notify_timeouts += 1
+                if self._consecutive_notify_timeouts >= UNILED_BLE_NOTIFICATION_RECYCLE:
+                    _LOGGER.warning(
+                        "%s: %s consecutive unsuccessful polls; forcing a fresh BLE connection.",
+                        self.name,
+                        self._consecutive_notify_timeouts,
+                    )
+                    self._consecutive_notify_timeouts = 0
+                    await self._async_invoke_forced_disconnect()
+                return False
+
+        self._consecutive_notify_timeouts = 0
 
         for channel in self.channel_list:
             _LOGGER.debug(
