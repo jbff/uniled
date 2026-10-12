@@ -135,6 +135,13 @@ class SPTechBleModel(SPTechModel, UniledBleModel):
                 return self.decode_response_payload(device, (), header, full_payload)
             return None
 
+        if packet_index < device._sptech_buffer["expected"]:
+            # Duplicate (or late-retransmitted) chunk: parallel notification
+            # streams and BLE retries can deliver the same packet index more
+            # than once in tight lockstep. Ignore the copy and keep the
+            # burst in progress instead of aborting the whole message.
+            return None
+
         delattr(device, "_sptech_buffer")
         return None
 
