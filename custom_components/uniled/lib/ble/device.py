@@ -39,7 +39,11 @@ UNILED_TRANSPORT_BLE: Final = "ble"
 
 UNILED_BLE_BAD_RSSI = -127
 UNILED_BLE_ERROR_BACKOFF_TIME = 0.25
-UNILED_BLE_NOTFICATION_TIMEOUT = 8.0
+# Wait for the SP5xx status burst. Notifications on a single ACL link are
+# delivered in order, so a lost mid-burst chunk never arrives late: a short
+# timeout just retries the query sooner (probe 2026-10-16: bursts complete
+# in <1s; losses come from active-scan interference, not slow chunks).
+UNILED_BLE_NOTFICATION_TIMEOUT = 2.5
 
 # Consecutive full poll failures (all state-query attempts timed out)
 # after which the BLE connection is recycled. SP5xx firmware degrades
@@ -381,6 +385,13 @@ class UniledBleDevice(UniledDevice):
                     self._consecutive_notify_timeouts = 0
                     await self._async_invoke_forced_disconnect()
                 return False
+
+            # The state burst arrived while we were waiting for it: the
+            # notification handler has already parsed it into the channel
+            # status. Falling through would re-send the query and force
+            # another burst (more airtime -> more chances to lose a chunk,
+            # e.g. while HA's scanner runs concurrently).
+            break
 
         self._consecutive_notify_timeouts = 0
 
